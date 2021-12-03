@@ -54,7 +54,7 @@ def dataAssociationPoints(list, measurement, pose, cov=None, nstd=2):
 
     #calculate ellipse parameters from covariance
     if cov is None:
-        cov = np.eye(2)*0.3  #Arbetrary covariance cicle of .1
+        cov = np.eye(2)*0.1  #Arbetrary covariance cicle of .1
 
     width, height, theta = cov_ellipse(cov,nstd)
     theta = -np.radians(theta)

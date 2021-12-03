@@ -26,11 +26,13 @@ class Landmark:
     """
     Pose Graph Landmark(Node) Class
     """
-    def __init__(self, x, y, id=None):
+    def __init__(self, x, y, x_guess=None, y_guess=None,  id=None):
 
         self.id = id        # ID of landmark 
         self.x = x          # x coordinate position [m]
         self.y = y          # y coordinate position [m]
+        self.x_guess = x_guess
+        self.y_guess = y_guess # Using x_guess and y_guess to compensate for drift during data-association
 
 class Edge:
     """
@@ -41,8 +43,8 @@ class Edge:
         Edge constructor
         """
         if inf_mat is None:
-            inf_mat = np.eye(3)   # if no information matrix is given, set identity matrix
-        
+            inf_mat = np.eye(3)  # if no information matrix is given, set identity matrix
+                        
         self.id_from = id_from    # viewing frame of this edge
         self.id_to = id_to        # pose being observed from the viewing frame
         self.mean = mean          # Predicted Virtual measurement - z_ij
@@ -60,7 +62,7 @@ class LandmarkEdge:
         self.id_to = id_to        # pose being observed from the viewing frame
         self.mean = mean          # Predicted Virtual measurement - z_ij
         if inf_mat is None:
-            inf_mat = np.eye(2)*100
+            inf_mat = np.eye(2)
         self.inf_mat = inf_mat    # Edge Information matrix - omega_ij (~ 1 / covariance)
 
 
@@ -69,7 +71,7 @@ class Graph:
     """
     Graph class to build up back-end
     """
-    def __init__(self, vertices = [], edges = [], landmarks = [], landmarkEdges = [], allVertices = [], verbose = True):
+    def __init__(self, vertices = [], edges = [], landmarks = [], landmarkEdges = [], allVertices = [], SIMPLE_lEVENBERG_MARQUARDT=False, lambda_=1, error=0,  verbose = True):
         """
         Pose Graph constructor
         """
@@ -78,11 +80,12 @@ class Graph:
         self.landmarks = landmarks          # Pose graph landmarks(nodes)
         self.landmarkEdges = landmarkEdges  # Pose graph edges from position to landmark(constraints)
         self.H = []                         # Information matrix of the system (constraints contribution)
+        self.SIMPLE_lEVENBERG_MARQUARDT = SIMPLE_lEVENBERG_MARQUARDT  
+        self.lambda_ = lambda_             
         self.b = []                         # Coefficient vector
         self.verbose = verbose              # Show optimization steps
-
         self.allVertices = allVertices
-
+        self.error = error
 
     #------------------------------------------------------------
     def read_from_data_files(self, robot_data, laser_data, encoder_inf=None,  laser_inf=None):
@@ -98,7 +101,9 @@ class Graph:
 
         #add edges between every robot pose to list
             if i!=0:
-                e_mean = v - vertices[i-1]
+                mean = t2v(np.dot(inv(v2t(vertices[i-1])), v2t(v)))
+                # e_mean = v - vertices[i-1]
+                e_mean = mean
                 self.edges.append(Edge(id_from = i-1, 
                                     id_to = i,
                                     mean = e_mean,
@@ -121,15 +126,21 @@ class Graph:
             for j in range(len(corners)):
                 corner = corners[j]
                 index, meas_world = da.dataAssociationPoints(self.landmarks, corner, self.vertices[i])
+                meas = np.array([corner[0], corner[1]])
+
                 if(index ==-1):
                     from_ = i
                     to_ = len(self.landmarks)
-                    self.landmarkEdges.append(LandmarkEdge(from_, to_, corner, inf_mat = laser_inf))
-                    self.landmarks.append(Landmark(meas_world[0],meas_world[1],to_))
+                    self.landmarkEdges.append(LandmarkEdge(from_, to_, meas, inf_mat = laser_inf))
+                    self.landmarks.append(Landmark(x = meas_world[0],y = meas_world[1], x_guess= meas_world[0], y_guess=meas_world[1], id=to_))
                 else:
                     from_ = i
                     to_ = index
-                    self.landmarkEdges.append(LandmarkEdge(from_, to_, corner, inf_mat = laser_inf))
+                    self.landmarkEdges.append(LandmarkEdge(from_, to_, meas, inf_mat = laser_inf))
+                    #update x_guess and y_guess for data association
+                    self.landmarks[index].x_guess = meas_world[0]
+                    self.landmarks[index].y_guess = meas_world[1]
+
 
     #---------------------------------------------------------------------------
     def read_from_constraint_edges_files(self):
@@ -233,15 +244,20 @@ class Graph:
         # Keep first node fixed
         self.H[:3,:3] += np.eye(3)*1000
 
-        # plt.imshow(self.H, cmap='Greys', interpolation='none')
-        # plt.colorbar()
-        # plt.show()
-        # plt.imshow(self.b, cmap='Greys', interpolation='none')
-        # plt.colorbar()
-        # plt.show()
+        if(self.SIMPLE_lEVENBERG_MARQUARDT==False):
+            dX = solve(H = self.H, b = self.b, sparse_solve=True)
+            #apply solution to state vector
+            self.update_vertices(dX)
+            self.error = self.compute_global_error()
+            return dX
 
-        dX = solve(H = self.H, b = self.b, sparse_solve=True)
-        return dX
+        else:
+            self.H+=np.eye(self.H.shape[0])*self.lambda_
+            dX = solve(H = self.H, b = self.b, sparse_solve=True)
+            #apply solution to state vector
+            self.update_vertices_SLM(dX)
+            self.error = self.compute_global_error()
+            return dX
 
     def update_vertices(self, dx):
         robot_update, landmark_update  = np.split(dx, [3*len(self.vertices)]) 
@@ -260,6 +276,36 @@ class Graph:
             self.landmarks[i].x += landmark_update[i,0]
             self.landmarks[i].y += landmark_update[i,1]
 
+    def update_vertices_SLM(self, dx):
+        robot_update, landmark_update  = np.split(dx, [3*len(self.vertices)]) 
+        robot_update = robot_update.reshape(len(self.vertices), 3)
+        landmark_update = landmark_update.reshape(len(self.landmarks), 2)
+        
+        prev_error = self.compute_global_error()
+
+        temp_vertices = np.copy(self.vertices)
+        temp_landmarks = np.copy(self.landmarks)
+
+        #update robot poses:
+        for i in range(len(robot_update)):
+            self.vertices[i].x     += robot_update[i,0]
+            self.vertices[i].y     += robot_update[i,1]
+            self.vertices[i].theta += robot_update[i,2]
+
+
+        #update landmark poses:
+        for i in range(len(landmark_update)):
+            self.landmarks[i].x += landmark_update[i,0]
+            self.landmarks[i].y += landmark_update[i,1]
+
+        error = self.compute_global_error()
+
+        if(prev_error < error):
+            self.vertices = temp_vertices
+            self.landmarks = temp_landmarks
+            self.lambda_ *=2
+        else:
+            self.lambda_/=2
 
 
     def linearize_and_add(self):
@@ -338,7 +384,8 @@ class Graph:
             self.b[3*i:3*(i+1)]     +=b_i.reshape(3,1)
             self.b[j:_j]            +=b_j.reshape(2,1)
 
-
+    def get_error(self):
+        return self.error
 
     def compute_global_error(self):
         #return value 
@@ -354,7 +401,7 @@ class Graph:
             z_ij = e.mean                    #measurement
             inf_mat = e.inf_mat              #information matrix 
 
-            es= t2v(inv(np.dot(np.dot(v2t(z_ij),(inv(v2t(x_i)))),v2t(x_j))));   
+            es=  t2v(np.dot(inv(v2t(z_ij)),  np.dot(inv(v2t(x_i)),v2t(x_j))))
             Fx = Fx + np.dot(es.T, np.dot(inf_mat, es))
 
         #loop over pose-landmark edges
@@ -363,19 +410,23 @@ class Graph:
             robot_i = self.vertices[l.id_from]   #pose from 
             x_i = np.array([robot_i.x, robot_i.y, robot_i.theta])
             landmark_j = self.landmarks[l.id_to]    #landmark to 
-            x_j = np.array([landmark_j.x, landmark_j.y])
-            z_ij = np.array([float(l.mean[0]), float(l.mean[1])])
+            xt_j = np.array([[landmark_j.x], [landmark_j.y], [1]]) #homogenous vector
+            # z_ij = np.array([[l.mean[0]],[l.mean[1]]])
+            z_ij = l.mean.reshape(2,1)
             inf_mat = l.inf_mat     
 
             # make homogeneous
-            xt_j = np.hstack([x_j, 1]).reshape(3,1)
-            zt_ij = np.hstack([z_ij, 1]).reshape(3,1)
-            es = np.dot(inv(v2t(x_i)), (xt_j - zt_ij))
-            es = es[:2,:2]
+            zt_ij = np.vstack([z_ij, 1])
+
+            es = np.dot(inv(v2t(x_i)), xt_j) - zt_ij
+            es = es[:2]
             Fx = Fx + np.dot(es.T, np.dot(inf_mat, es))
+
         return Fx
         
-    def plot_graph(self,title=None, show_constraints= False):
+
+
+    def plot_graph(self,title=None, show_constraints= False, error_path = None, gt_path=None):
         node_x = np.array([])
         node_y = np.array([])
         mark_x = np.array([])
@@ -404,7 +455,26 @@ class Graph:
                 [self.vertices[l.id_from].y, self.landmarks[l.id_to].y],
                 color = 'green', lw = 0.5,)
 
+        if gt_path!=None:
+            vertices = np.loadtxt(gt_path, usecols = range(2,5)) 
+            node_x = np.array([])
+            node_y = np.array([])
+            for v in vertices:
+                node_x = np.append(node_x, v[0])
+                node_y = np.append(node_y, v[1])           
+            plt.scatter(node_x, node_y, s = 4, color = 'y', label = 'GT poses')
+
+        if error_path!=None:
+            vert = np.loadtxt(error_path, usecols = range(2,5)) 
+            node_x = np.array([])
+            node_y = np.array([])
+            for v in vert:
+                node_x = np.append(node_x, v[0])
+                node_y = np.append(node_y, v[1])           
+            plt.scatter(node_x, node_y, s = 4, color = 'r', label = 'error poses')
+
         plt.title(title)
         plt.xlabel('x[m]')
         plt.ylabel('y[m]')
         plt.legend()
+

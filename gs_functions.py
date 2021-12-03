@@ -65,7 +65,7 @@ def solve(H, b, sparse_solve):
         dX = np.linalg.solve(H, b)
         
     # Keep first node fixed    
-    dX[:3] = [0, 0, 0] 
+    # dX[:3] = [0, 0, 0] 
     
     # Check NAN
     dX[np.isnan(dX)] = 0
