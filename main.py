@@ -17,7 +17,7 @@ if __name__ == '__main__':
 
     # gs.read_from_data_files(robot_data = robot_path, laser_data=laser_path)
     gs.read_from_constraint_edges_files()
-
+    gs.write_poses_to_file()
     fig = plt.figure(1)
     gs.plot_graph("seperate data unoptimized", show_constraints = True)
     print("initial error =" )

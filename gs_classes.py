@@ -7,7 +7,7 @@ from gs_functions import *
 from SaM import *
 import dataAssociation as da
 
-
+import csv
 
 class Vertex:
     """
@@ -168,11 +168,10 @@ class Graph:
                 if v1_exists == False:
                     id_from = len(self.vertices)
                     existing_vertices.append([fromId, id_from])
-
                     self.vertices.append(Vertex(id = id_from,
-                                                x = poses[fromId][0], 
-                                                y = poses[fromId+1][0], 
-                                                theta = poses[fromId+2][0]))
+                                                x = poses[fromId-1][0], 
+                                                y = poses[fromId][0], 
+                                                theta = poses[fromId+1][0]))
 
                 for v in existing_vertices:
                     if v[0]==toId:
@@ -478,3 +477,11 @@ class Graph:
         plt.ylabel('y[m]')
         plt.legend()
 
+    def write_poses_to_file(self):
+        
+        f= open('poses','w')
+        writer = csv.writer(f)
+        for v in self.vertices:
+            row = [str(v.x), str(v.y), str(v.theta)]
+            writer.writerow(row)
+        
